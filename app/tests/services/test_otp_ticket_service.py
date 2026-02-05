@@ -21,13 +21,16 @@ async def test_verify_otp_issues_ticket_atomically(monkeypatch):
     assert ticket == ticket_value
     redis.eval.assert_awaited_once_with(
         svc.ATOMIC_EXCHANGE_SCRIPT,
-        2,
+        3,
         svc._otp_key(email),
         svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
         otp,
         email.lower(),
         settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
     )
+
 
 @pytest.mark.asyncio
 async def test_verify_otp_rejects_invalid_code(monkeypatch):
@@ -45,13 +48,44 @@ async def test_verify_otp_rejects_invalid_code(monkeypatch):
 
     redis.eval.assert_awaited_once_with(
         svc.ATOMIC_EXCHANGE_SCRIPT,
-        2,
+        3,
         svc._otp_key(email),
         svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
         otp,
         email.lower(),
         settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
     )
+
+
+@pytest.mark.asyncio
+async def test_verify_otp_lockout(monkeypatch):
+    svc = OTPTicketService()
+    email = 'locked@example.com'
+    otp = '000000'
+    ticket_value = 'ticket-locked'
+    redis = AsyncMock()
+    redis.eval.return_value = -2
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.secrets.token_urlsafe', lambda n=32: ticket_value)
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.get_redis', AsyncMock(return_value=redis))
+
+    with pytest.raises(OTPInvalidError) as exc:
+        await svc.verify_otp_and_issue_ticket(email, otp)
+
+    assert 'Too many failed attempts' in str(exc.value)
+    redis.eval.assert_awaited_once_with(
+        svc.ATOMIC_EXCHANGE_SCRIPT,
+        3,
+        svc._otp_key(email),
+        svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
+        otp,
+        email.lower(),
+        settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
+    )
+
 
 @pytest.mark.asyncio
 async def test_email_normalization_consistency(monkeypatch):
@@ -71,16 +105,18 @@ async def test_email_normalization_consistency(monkeypatch):
     async def fake_eval(script, numkeys, *parts):
         keys = parts[:numkeys]
         argv = parts[numkeys:]
-        otp_key, ticket_key = keys
-        otp_val, email_val, ttl = argv
+        otp_key, ticket_key, attempts_key = keys
+        otp_val, email_val, ttl, max_attempts = argv
         stored = await fake.get(otp_key)
         if stored is None:
             return 0
         stored_val = stored.decode("utf-8") if isinstance(stored, bytes) else stored
         if stored_val != otp_val:
+            # simulate increment but ignore counting for brevity
             return 0
         await fake.delete(otp_key)
         await fake.setex(ticket_key, int(ttl), email_val.encode("utf-8"))
+        await fake.delete(attempts_key)
         return 1
 
     monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.redis_setex', fake_setex)
