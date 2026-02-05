@@ -58,6 +58,7 @@ return current
         return f"{secrets.randbelow(1_000_000):06d}"
 
     async def issue_otp(self, email: str) -> OTPResult:
+        email = email.lower().strip()
         otp = self.generate_otp()
         await redis_setex(self._otp_key(email), settings.OTP_TTL_SECONDS, otp.encode("utf-8"))
         return OTPResult(otp=otp)
@@ -79,6 +80,7 @@ return current
             return value
 
     async def verify_otp_and_issue_ticket(self, email: str, otp: str) -> str:
+        email = email.lower().strip()
         redis = await get_redis()
         ticket = secrets.token_urlsafe(32)
         otp_key = self._otp_key(email)
@@ -91,7 +93,7 @@ return current
                 otp_key,
                 ticket_key,
                 otp,
-                email.lower(),
+                email,
                 settings.SIGNUP_TICKET_TTL_SECONDS,
             )
         except ResponseError as exc:
@@ -103,8 +105,9 @@ return current
         raise OTPInvalidError('Invalid or expired OTP')
 
     async def consume_ticket(self, email: str, ticket: str) -> None:
+        email = email.lower().strip()
         key = self._ticket_key(ticket)
-        expected = email.lower()
+        expected = email
         result = await self._consume_ticket_value(key, expected)
 
         if result is None:

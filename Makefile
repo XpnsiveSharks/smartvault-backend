@@ -125,3 +125,6 @@ test-k:
 	@test "$(k)" || (echo "❌ k is required. Usage: make test-k k='pattern'"; exit 1)
 	docker compose exec api pytest -k "$(k)" -q
 
+.PHONY: install
+install:
+	docker compose exec $(SERVICE) pip install -r requirements.txt

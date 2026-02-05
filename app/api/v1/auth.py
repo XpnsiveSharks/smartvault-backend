@@ -32,6 +32,12 @@ async def request_otp(
         limit=settings.RATE_LIMIT_OTP_REQ_PER_MIN,
         window_seconds=60
     )
+    # Limit requests per target email to mitigate distributed harassment/flooding
+    await limiter.allow_request(
+        key=f"otp_req:email:{payload.email.lower()}",
+        limit=3,
+        window_seconds=900,
+    )
     result = await otp_svc.issue_otp(payload.email)
     await email_svc.send_otp(payload.email, result.otp)
 

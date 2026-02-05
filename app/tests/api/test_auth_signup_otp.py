@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+from app.api.deps.auth import get_rate_limiter
+from app.infrastructure.security.rate_limiter import RateLimitExceeded
+
 
 def test_signup_happy_path(client, capture_email_service):
     email = "a@example.com"
@@ -78,3 +82,29 @@ def test_verify_otp_rejects_wrong_code(client):
     # wrong otp
     r2 = client.post("/api/v1/auth/verify-otp", json={"email": email, "otp": "000000"})
     assert r2.status_code == 422, r2.text
+
+
+def test_request_otp_email_rate_limit(monkeypatch, client):
+    limiter = get_rate_limiter()
+    call_counts = {"email": 0}
+
+    async def fake_allow_request(*, key: str, limit: int, window_seconds: int):
+        if key.startswith("otp_req:email:"):
+            call_counts["email"] += 1
+            if call_counts["email"] > 3:
+                raise RateLimitExceeded()
+        # allow other keys
+
+    monkeypatch.setattr(limiter, "allow_request", AsyncMock(side_effect=fake_allow_request))
+
+    email = "victim@test.com"
+    for _ in range(3):
+        resp = client.post("/api/v1/auth/request-otp", json={"email": email})
+        assert resp.status_code == 204, resp.text
+
+    resp = client.post("/api/v1/auth/request-otp", json={"email": email})
+    assert resp.status_code == 429, resp.text
+
+
+
+
