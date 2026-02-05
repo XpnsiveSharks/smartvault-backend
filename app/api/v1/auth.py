@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from starlette.concurrency import run_in_threadpool
 
@@ -15,6 +17,8 @@ from app.infrastructure.security.rate_limiter import RateLimiter
 from app.core.settings import settings
 from app.schemas.auth import OTPRequest, OTPVerifyRequest, OTPVerifyResponse, SignupRequest, LoginRequest, Token
 from app.schemas.users import UserResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,6 +42,7 @@ async def request_otp(
         limit=3,
         window_seconds=900,
     )
+    logger.info("OTP_REQUEST email=%s ip=%s", payload.email, client_ip)
     result = await otp_svc.issue_otp(payload.email)
     await email_svc.send_otp(payload.email, result.otp)
 

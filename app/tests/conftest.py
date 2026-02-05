@@ -11,6 +11,10 @@ from app.infrastructure.db.repositories.in_memory_vault_repository import InMemo
 from app.tests.fakes.email_service import CaptureEmailService
 
 
+def _to_str(val):
+    return val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else val
+
+
 @pytest.fixture
 def app():
     previous = settings.DEV_AUTH_BYPASS
@@ -37,21 +41,21 @@ async def _fake_redis(monkeypatch):
 
     async def _eval(script, numkeys, *parts):
         keys = parts[:numkeys]
-        argv = parts[numkeys:]
+        argv = tuple(_to_str(a) for a in parts[numkeys:])
 
-        # OTP verify script: KEYS[0]=otp_key, KEYS[1]=ticket_key, ARGV=[otp, email, ttl]
-        if numkeys == 2 and len(argv) == 3:
-            otp_key, ticket_key = keys
-            otp, email, ttl = argv
+        # OTP verify script (3 keys, 4 args): KEYS=[otp_key,ticket_key,attempts_key], ARGV=[otp,email,ttl,max]
+        if numkeys == 3 and len(argv) >= 4:
+            otp_key, ticket_key, attempts_key = keys
+            otp, email, ttl, _max = argv[:4]
             stored = await fake.get(otp_key)
             if stored is None:
-                return 0
-            stored_val = stored.decode("utf-8") if isinstance(stored, bytes) else stored
+                return None
+            stored_val = _to_str(stored)
             if stored_val != otp:
                 return 0
             await fake.delete(otp_key)
-            value_to_set = email if isinstance(stored, str) else email.encode("utf-8")
-            await fake.setex(ticket_key, int(ttl), value_to_set)
+            await fake.delete(attempts_key)
+            await fake.setex(ticket_key, int(ttl), email.encode("utf-8"))
             return 1
 
         # Ticket consume script: KEYS[0]=ticket_key, ARGV=[expected]
@@ -61,7 +65,7 @@ async def _fake_redis(monkeypatch):
             current = await fake.get(ticket_key)
             if current is None:
                 return None
-            current_val = current.decode("utf-8") if isinstance(current, bytes) else current
+            current_val = _to_str(current)
             if current_val != expected:
                 return 0
             await fake.delete(ticket_key)

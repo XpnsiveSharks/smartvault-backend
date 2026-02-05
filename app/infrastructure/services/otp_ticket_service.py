@@ -91,17 +91,8 @@ return current
     async def _consume_ticket_value(self, key: str, expected: str) -> bytes | None | int:
         """Atomically read-and-delete the signup ticket only when it matches expected email."""
         redis = await get_redis()
-        try:
-            result = await redis.eval(self._TICKET_CONSUME_LUA, 1, key, expected)
-            return result
-        except ResponseError:
-            value = await redis.get(key)
-            if value is None:
-                return None
-            if value.decode("utf-8") != expected:
-                return 0
-            await redis.delete(key)
-            return value
+        result = await redis.eval(self._TICKET_CONSUME_LUA, 1, key, expected)
+        return result
 
     async def verify_otp_and_issue_ticket(self, email: str, otp: str) -> str:
         email = email.lower().strip()
