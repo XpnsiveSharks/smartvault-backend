@@ -11,32 +11,28 @@ from app.infrastructure.cache.redis_client import (
     redis_setex,
 )
 
-
 @dataclass(frozen=True)
 class OTPResult:
     otp: str
 
-
 class OTPInvalidError(ValueError):
     pass
-
 
 class TicketInvalidError(ValueError):
     pass
 
-
 class OTPTicketService:
-    _OTP_CONSUME_LUA = """
-local current = redis.call('GET', KEYS[1])
-if not current then return nil end
-if current ~= ARGV[1] then return 0 end
--- prefer GETDEL when available (Redis >= 6.2)
-local ok, val = pcall(redis.call, 'GETDEL', KEYS[1])
-if ok then
-  return val
+    ATOMIC_EXCHANGE_SCRIPT = """
+-- Keys: [OTP_KEY, TICKET_KEY]
+-- Args: [USER_INPUT_OTP, TICKET_VALUE, TICKET_TTL_SECONDS]
+local stored_otp = redis.call('GET', KEYS[1])
+if stored_otp == ARGV[1] then
+    redis.call('DEL', KEYS[1])
+    redis.call('SETEX', KEYS[2], ARGV[3], ARGV[2])
+    return 1
+else
+    return 0
 end
-redis.call('DEL', KEYS[1])
-return current
 """
 
     _TICKET_CONSUME_LUA = """
@@ -66,28 +62,6 @@ return current
         await redis_setex(self._otp_key(email), settings.OTP_TTL_SECONDS, otp.encode("utf-8"))
         return OTPResult(otp=otp)
 
-    async def _consume_otp_value(self, key: str, expected: str) -> bytes | None | int:
-        """Atomically read-and-delete the OTP value only when it matches expected.
-
-        Returns:
-            bytes: the consumed value when matched and deleted
-            0: when value exists but does not match expected
-            None: when key is missing/expired
-        """
-        redis = await get_redis()
-        try:
-            result = await redis.eval(self._OTP_CONSUME_LUA, 1, key, expected)
-            return result
-        except ResponseError:
-            # Fallback if EVAL is disabled: best-effort match then delete
-            value = await redis.get(key)
-            if value is None:
-                return None
-            if value.decode("utf-8") != expected:
-                return 0
-            await redis.delete(key)
-            return value
-
     async def _consume_ticket_value(self, key: str, expected: str) -> bytes | None | int:
         """Atomically read-and-delete the signup ticket only when it matches expected email."""
         redis = await get_redis()
@@ -105,21 +79,28 @@ return current
             return value
 
     async def verify_otp_and_issue_ticket(self, email: str, otp: str) -> str:
-        key = self._otp_key(email)
-        result = await self._consume_otp_value(key, otp)
-
-        if result is None:
-            raise OTPInvalidError("OTP expired or not found")
-        if result == 0 or (isinstance(result, bytes) and result.decode("utf-8") != otp):
-            raise OTPInvalidError("Invalid OTP")
-
+        redis = await get_redis()
         ticket = secrets.token_urlsafe(32)
-        await redis_setex(
-            self._ticket_key(ticket),
-            settings.SIGNUP_TICKET_TTL_SECONDS,
-            email.lower().encode("utf-8"),
-        )
-        return ticket
+        otp_key = self._otp_key(email)
+        ticket_key = self._ticket_key(ticket)
+
+        try:
+            result = await redis.eval(
+                self.ATOMIC_EXCHANGE_SCRIPT,
+                2,
+                otp_key,
+                ticket_key,
+                otp,
+                email.lower(),
+                settings.SIGNUP_TICKET_TTL_SECONDS,
+            )
+        except ResponseError as exc:
+            raise OTPInvalidError('Invalid or expired OTP') from exc
+
+        if result == 1:
+            return ticket
+
+        raise OTPInvalidError('Invalid or expired OTP')
 
     async def consume_ticket(self, email: str, ticket: str) -> None:
         key = self._ticket_key(ticket)
