@@ -82,6 +82,7 @@ async def signup(
         ) from exc
 
 
+# UPDATED LOGIN
 @router.post("/login", response_model=Token)
 async def login(
     request: Request,
