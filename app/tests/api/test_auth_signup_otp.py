@@ -85,7 +85,7 @@ def test_verify_otp_rejects_wrong_code(client):
 
 
 def test_request_otp_email_rate_limit(monkeypatch, client):
-    limiter = get_rate_limiter()
+    limiter = next(get_rate_limiter())
     call_counts = {"email": 0}
 
     async def fake_allow_request(*, key: str, limit: int, window_seconds: int):
@@ -104,7 +104,6 @@ def test_request_otp_email_rate_limit(monkeypatch, client):
 
     resp = client.post("/api/v1/auth/request-otp", json={"email": email})
     assert resp.status_code == 429, resp.text
-
 
 
 
