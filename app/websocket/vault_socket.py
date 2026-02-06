@@ -1,4 +1,4 @@
-# app/websocket/vault_socket.py
+﻿# app/websocket/vault_socket.py
 """
 WebSocket endpoints for SmartVault real-time communication.
 
@@ -18,7 +18,7 @@ from app.domain.value_objects.websocket_messages import MessageType
 from app.application.use_cases.process_vault_state_update import ProcessVaultStateUpdate
 from app.application.ports.vault_repository import VaultRepository
 from app.api.deps.vaults import get_vault_repo
-from app.api.deps.common import get_current_user_id
+from app.api.deps.common import get_user_id_from_header
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,7 +46,7 @@ async def websocket_user_endpoint(
     """
     
     # Dummy auth for now (backward compatible)
-    user_id = get_current_user_id()
+    user_id = get_user_id_from_header()
     
     # Connect
     await manager.connect_user(websocket, user_id)
