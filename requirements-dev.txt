@@ -1,3 +1,4 @@
 pytest
 httpx
 pytest-asyncio
+fakeredis>=2.0.0
