@@ -12,3 +12,5 @@ pydantic[email]
 redis>=5
 aiosmtplib
 pytest-asyncio
+pytest
+httpx

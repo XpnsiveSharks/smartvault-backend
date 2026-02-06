@@ -1,144 +1,107 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from starlette.concurrency import run_in_threadpool
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.deps.users import get_create_user_uc, get_authenticate_user_uc
-from app.api.deps.auth import get_email_service, get_otp_ticket_service, get_rate_limiter, get_token_service
-from app.application.use_cases.create_user import CreateUser, CreateUserInput, DuplicateEmailError
-from app.application.use_cases.authenticate_user import AuthenticateUser, LoginInput, InvalidCredentialsError
-from app.application.services.token_service import TokenService
-from app.infrastructure.notifications.email_service import EmailService
-from app.infrastructure.services.otp_ticket_service import OTPTicketService, OTPInvalidError, TicketInvalidError
-from app.infrastructure.security.rate_limiter import RateLimiter
-from app.core.settings import settings
-# Updated imports
+from app.api.deps.auth import (
+    get_login_uc,
+    get_request_otp_uc,
+    get_signup_uc,
+    get_verify_otp_uc,
+)
+from app.application.use_cases.auth_login import LoginInputDTO, LoginUseCase
+from app.application.use_cases.auth_request_otp import RequestOTPInput, RequestOTPUseCase
+from app.application.use_cases.auth_signup import SignupInput, SignupUseCase, TicketInvalidError
+from app.application.use_cases.auth_verify_otp import (
+    OTPInvalidError,
+    VerifyOTPInput,
+    VerifyOTPUseCase,
+)
+from app.application.use_cases.authenticate_user import InvalidCredentialsError
+from app.application.use_cases.create_user import DuplicateEmailError
 from app.schemas.auth import (
-    OTPRequest, OTPVerifyRequest, OTPVerifyResponse, SignupRequest, 
-    LoginRequest, Token, RefreshRequest, LogoutRequest
+    LoginRequest,
+    OTPRequest,
+    OTPVerifyRequest,
+    OTPVerifyResponse,
+    SignupRequest,
+    Token,
 )
 from app.schemas.users import UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ... (Keep request-otp, verify-otp, signup unchanged) ...
+
 @router.post("/request-otp", status_code=status.HTTP_204_NO_CONTENT)
-async def request_otp(  
+async def request_otp(
     request: Request,
     payload: OTPRequest,
-    otp_svc: OTPTicketService = Depends(get_otp_ticket_service),
-    email_svc: EmailService = Depends(get_email_service),
-    limiter: RateLimiter = Depends(get_rate_limiter),
+    uc: RequestOTPUseCase = Depends(get_request_otp_uc),
 ) -> None:
     client_ip = request.client.host if request.client else "unknown"
-    await limiter.allow_request(
-        key=f"otp_req:{client_ip}",
-        limit=settings.RATE_LIMIT_OTP_REQ_PER_MIN,
-        window_seconds=60
-    )
-    result = await otp_svc.issue_otp(payload.email)
-    await email_svc.send_otp(payload.email, result.otp)
+    await uc.execute(RequestOTPInput(email=payload.email, client_ip=client_ip))
+
 
 @router.post("/verify-otp", response_model=OTPVerifyResponse)
 async def verify_otp(
     payload: OTPVerifyRequest,
-    otp_svc: OTPTicketService = Depends(get_otp_ticket_service),
+    uc: VerifyOTPUseCase = Depends(get_verify_otp_uc),
 ) -> OTPVerifyResponse:
     try:
-        ticket = await otp_svc.verify_otp_and_issue_ticket(payload.email, payload.otp)
-        return OTPVerifyResponse(signup_ticket=ticket)
-    except OTPInvalidError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e))
+        result = await uc.execute(VerifyOTPInput(email=payload.email, otp=payload.otp))
+        return OTPVerifyResponse(signup_ticket=result.signup_ticket)
+    except OTPInvalidError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
     payload: SignupRequest,
-    otp_svc: OTPTicketService = Depends(get_otp_ticket_service),
-    uc: CreateUser = Depends(get_create_user_uc),
+    uc: SignupUseCase = Depends(get_signup_uc),
 ) -> UserResponse:
     try:
-        await otp_svc.consume_ticket(payload.email, payload.signup_ticket)
-        user = await run_in_threadpool(
-            uc.execute,
-            CreateUserInput(
+        user = await uc.execute(
+            SignupInput(
                 email=payload.email,
                 password=payload.password,
                 full_name=payload.full_name,
+                signup_ticket=payload.signup_ticket,
             )
         )
         return UserResponse.model_validate(user)
-    except TicketInvalidError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e))
-    except DuplicateEmailError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except TicketInvalidError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except DuplicateEmailError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
 
 # UPDATED LOGIN
 @router.post("/login", response_model=Token)
 async def login(
     request: Request,
     payload: LoginRequest,
-    uc: AuthenticateUser = Depends(get_authenticate_user_uc),
-    token_svc: TokenService = Depends(get_token_service),
-    limiter: RateLimiter = Depends(get_rate_limiter),
+    uc: LoginUseCase = Depends(get_login_uc),
 ) -> Token:
     client_ip = request.client.host if request.client else "unknown"
-    await limiter.allow_request(
-        key=f"login_req:{client_ip}",
-        limit=settings.RATE_LIMIT_LOGIN_REQ_PER_MIN,
-        window_seconds=60
-    )
-
     try:
-        user = await run_in_threadpool(
-            uc.execute,
-            LoginInput(email=payload.email, password=payload.password)
+        result = await uc.execute(
+            LoginInputDTO(
+                email=payload.email,
+                password=payload.password,
+                client_ip=client_ip,
+            )
         )
-        
-        access_token = token_svc.create_access_token(subject=user.id)
-        refresh_token = token_svc.create_refresh_token(user_id=user.id)
-        
-        return Token(
-            access_token=access_token, 
-            refresh_token=refresh_token,
-            token_type="bearer",
-            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-        )
-        
+        return Token(access_token=result.access_token, token_type=result.token_type)
     except InvalidCredentialsError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-# NEW: REFRESH ENDPOINT
-@router.post("/refresh", response_model=Token)
-async def refresh_token(
-    payload: RefreshRequest,
-    token_svc: TokenService = Depends(get_token_service),
-) -> Token:
-    try:
-        # Atomic rotation
-        new_access, new_refresh, _ = token_svc.rotate_refresh_token(payload.refresh_token)
-        
-        return Token(
-            access_token=new_access,
-            refresh_token=new_refresh,
-            token_type="bearer",
-            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-        )
-    except ValueError:
-        # 401 indicates invalid token (or reused)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-# NEW: LOGOUT ENDPOINT
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(
-    payload: LogoutRequest,
-    token_svc: TokenService = Depends(get_token_service),
-) -> None:
-    token_svc.revoke_refresh_token(payload.refresh_token)

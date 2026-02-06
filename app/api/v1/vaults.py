@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+﻿from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps.vaults import get_vault_repo
-from app.api.deps.common import get_current_user_id
+from app.api.deps.common import get_user_id_from_header
 from app.application.ports.vault_repository import VaultRepository
 from app.application.use_cases.get_vault_status import GetVaultStatus
 from app.application.use_cases.provision_vault import (
@@ -25,7 +25,7 @@ router = APIRouter(tags=["vaults"])
 )
 def provision_vault(
     payload: ProvisionVaultRequest,
-    owner_id: str = Depends(get_current_user_id),
+    owner_id: str = Depends(get_user_id_from_header),
     repo: VaultRepository = Depends(get_vault_repo),
 ) -> ProvisionVaultResponse:
     use_case = ProvisionVault(repo)

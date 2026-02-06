@@ -21,9 +21,8 @@ class EmailService(Protocol):
 
 class DevEmailService:
     async def send_otp(self, to_email: str, otp: str) -> None:
-        # Dev-only backend; mask OTP and log at debug level only.
-        masked = otp[:2] + "*" * max(0, len(otp) - 2)
-        log.debug("DEV EMAIL: sending masked OTP to %s code=%s", to_email, masked)
+        # Dev-only backend; log full OTP for easier testing.
+        log.debug("DEV EMAIL: sending OTP to %s code=%s", to_email, otp)
 
 
 class SMTPEmailService:

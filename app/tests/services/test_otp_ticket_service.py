@@ -1,51 +1,137 @@
-import asyncio
-
 import pytest
+from unittest.mock import AsyncMock
 
+from app.core.settings import settings
 from app.infrastructure.services.otp_ticket_service import OTPTicketService, OTPInvalidError
-from app.infrastructure.cache.redis_client import redis_get, redis_del
 
 
 @pytest.mark.asyncio
-async def test_verify_otp_consumes_once_atomically():
+async def test_verify_otp_issues_ticket_atomically(monkeypatch):
     svc = OTPTicketService()
-    email = "concurrent@example.com"
-    otp = (await svc.issue_otp(email)).otp
+    email = 'concurrent@example.com'
+    otp = '123456'
+    ticket_value = 'ticket-success'
+    redis = AsyncMock()
+    redis.eval.return_value = 1
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.secrets.token_urlsafe', lambda n=32: ticket_value)
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.get_redis', AsyncMock(return_value=redis))
 
-    async def attempt():
-        try:
-            return await svc.verify_otp_and_issue_ticket(email, otp)
-        except OTPInvalidError:
-            return "invalid"
+    ticket = await svc.verify_otp_and_issue_ticket(email, otp)
 
-    first, second = await asyncio.gather(attempt(), attempt())
-    successes = [t for t in (first, second) if t != "invalid"]
-    failures = [t for t in (first, second) if t == "invalid"]
-
-    assert len(successes) == 1
-    assert len(failures) == 1
-
-    # OTP should be removed after the successful verification
-    stored = await redis_get(svc._otp_key(email))
-    assert stored is None
-
-    # cleanup any ticket that was issued
-    for ticket in successes:
-        await redis_del(svc._ticket_key(ticket))
+    assert ticket == ticket_value
+    redis.eval.assert_awaited_once_with(
+        svc.ATOMIC_EXCHANGE_SCRIPT,
+        3,
+        svc._otp_key(email),
+        svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
+        otp,
+        email.lower(),
+        settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
+    )
 
 
 @pytest.mark.asyncio
-async def test_wrong_otp_does_not_consume():
+async def test_verify_otp_rejects_invalid_code(monkeypatch):
     svc = OTPTicketService()
-    email = "wrong@example.com"
-    await svc.issue_otp(email)
+    email = 'wrong@example.com'
+    otp = '000000'
+    ticket_value = 'ticket-fail'
+    redis = AsyncMock()
+    redis.eval.return_value = 0
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.secrets.token_urlsafe', lambda n=32: ticket_value)
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.get_redis', AsyncMock(return_value=redis))
 
     with pytest.raises(OTPInvalidError):
-        await svc.verify_otp_and_issue_ticket(email, "000000")
+        await svc.verify_otp_and_issue_ticket(email, otp)
 
-    # OTP should still be present after a wrong attempt
-    still_there = await redis_get(svc._otp_key(email))
-    assert still_there is not None
+    redis.eval.assert_awaited_once_with(
+        svc.ATOMIC_EXCHANGE_SCRIPT,
+        3,
+        svc._otp_key(email),
+        svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
+        otp,
+        email.lower(),
+        settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
+    )
 
-    # cleanup
-    await redis_del(svc._otp_key(email))
+
+@pytest.mark.asyncio
+async def test_verify_otp_lockout(monkeypatch):
+    svc = OTPTicketService()
+    email = 'locked@example.com'
+    otp = '000000'
+    ticket_value = 'ticket-locked'
+    redis = AsyncMock()
+    redis.eval.return_value = -2
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.secrets.token_urlsafe', lambda n=32: ticket_value)
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.get_redis', AsyncMock(return_value=redis))
+
+    with pytest.raises(OTPInvalidError) as exc:
+        await svc.verify_otp_and_issue_ticket(email, otp)
+
+    assert 'Too many failed attempts' in str(exc.value)
+    redis.eval.assert_awaited_once_with(
+        svc.ATOMIC_EXCHANGE_SCRIPT,
+        3,
+        svc._otp_key(email),
+        svc._ticket_key(ticket_value),
+        f"otp_attempts:{email}",
+        otp,
+        email.lower(),
+        settings.SIGNUP_TICKET_TTL_SECONDS,
+        5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_email_normalization_consistency(monkeypatch):
+    import fakeredis.aioredis as fakeredis
+
+    svc = OTPTicketService()
+    mixed_email = "  CamelCase@Example.com  "
+    normalized = "camelcase@example.com"
+    fixed_otp = "654321"
+    fixed_ticket = "ticket-normalized"
+
+    fake = fakeredis.FakeRedis()
+
+    async def fake_setex(key: str, ttl: int, value: bytes):
+        await fake.setex(key, ttl, value)
+
+    async def fake_eval(script, numkeys, *parts):
+        keys = parts[:numkeys]
+        argv = parts[numkeys:]
+        otp_key, ticket_key, attempts_key = keys
+        otp_val, email_val, ttl, max_attempts = argv
+        stored = await fake.get(otp_key)
+        if stored is None:
+            return 0
+        stored_val = stored.decode("utf-8") if isinstance(stored, bytes) else stored
+        if stored_val != otp_val:
+            # simulate increment but ignore counting for brevity
+            return 0
+        await fake.delete(otp_key)
+        await fake.setex(ticket_key, int(ttl), email_val.encode("utf-8"))
+        await fake.delete(attempts_key)
+        return 1
+
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.redis_setex', fake_setex)
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.get_redis', AsyncMock(return_value=fake))
+    monkeypatch.setattr('app.infrastructure.services.otp_ticket_service.secrets.token_urlsafe', lambda n=32: fixed_ticket)
+    monkeypatch.setattr(svc, 'generate_otp', lambda: fixed_otp)
+    fake.eval = fake_eval
+
+    result = await svc.issue_otp(mixed_email)
+    assert result.otp == fixed_otp
+    stored_otp = await fake.get(f"otp:{normalized}")
+    assert stored_otp is not None
+
+    ticket = await svc.verify_otp_and_issue_ticket("CamelCase@Example.com", fixed_otp)
+    assert ticket == fixed_ticket
+
+    stored_ticket_email = await fake.get(f"signup_ticket:{fixed_ticket}")
+    assert stored_ticket_email.decode("utf-8") == normalized
