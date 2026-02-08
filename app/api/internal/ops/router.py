@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request, HTTPException
 
 from app.api.deps.internal import get_ops_authenticator, get_ops_rate_limiter
 from app.infrastructure.security.internal_auth import OpsAuthenticator
-from app.infrastructure.security.rate_limiter import RateLimiter
+from app.infrastructure.security.rate_limiter import RateLimiter, RateLimitExceeded
 from app.core.settings import settings
 
 ops_router = APIRouter()
@@ -15,11 +15,19 @@ async def _ops_guard(
 ) -> None:
     identity = authenticator.authenticate(request)
     client_ip = request.client.host if request.client else "unknown"
-    await limiter.allow_request(
-        key=f"ops:{identity.principal}:{client_ip}",
-        limit=settings.INTERNAL_OPS_RATE_LIMIT_PER_MIN,
-        window_seconds=60,
-    )
+    try:
+        await limiter.allow_request(
+            key=f"ops:{identity.principal}:{client_ip}",
+            limit=settings.INTERNAL_OPS_RATE_LIMIT_PER_MIN,
+            window_seconds=60,
+        )
+    except RateLimitExceeded:
+        raise
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail closed but controlled
+        raise HTTPException(status_code=503, detail="Ops rate limiting unavailable")
 
 
 @ops_router.get("/health", dependencies=[Depends(_ops_guard)])
@@ -37,4 +45,3 @@ async def metrics() -> dict[str, str]:
 async def security_signals() -> dict[str, str]:
     # Placeholder for ops-focused security signals (e.g., abuse indicators).
     return {"detail": "security signals placeholder"}
-
