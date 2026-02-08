@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     # Rate Limiting
     RATE_LIMIT_OTP_REQ_PER_MIN: int = 3
     RATE_LIMIT_LOGIN_REQ_PER_MIN: int = 5
+
+    # Internal surfaces
+    INTERNAL_OPS_TOKEN_HASH: str | None = None
+    INTERNAL_OPS_TOKEN_ID: str | None = None
+    INTERNAL_OPS_RATE_LIMIT_PER_MIN: int = 60
+
+    ADMIN_SHARED_TOKEN_HASH: str | None = None
+    ADMIN_TOKEN_ID: str | None = None
+    ADMIN_JWT_SECRET: str | None = None
+    ADMIN_JWT_ALGORITHM: str = "HS256"
+    INTERNAL_ADMIN_RATE_LIMIT_PER_MIN: int = 20
     
     @property
     def resolved_email_backend(self) -> str:
