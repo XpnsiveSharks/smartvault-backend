@@ -6,6 +6,8 @@ from app.core.settings import settings
 from app.core.logging import setup_logging
 from app.infrastructure.messaging.websocket_manager import manager
 from app.infrastructure.cache.redis_client import redis_startup, redis_shutdown
+from app.api.internal.middleware import AdminAuditMiddleware
+from app.infrastructure.logging.audit import AuditLogger
 
 
 
@@ -31,6 +33,9 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Middleware specific to admin surface
+    app.add_middleware(AdminAuditMiddleware, audit_logger=AuditLogger())
 
     app.include_router(api_router, prefix="/api")
     return app
