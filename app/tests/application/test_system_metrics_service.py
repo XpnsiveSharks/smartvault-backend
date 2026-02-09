@@ -13,11 +13,15 @@ class _Adapter:
         return OverviewSnapshot(status="healthy", db_connected=True, redis_connected=True)
 
     async def fetch_performance(self, period: str, granularity: str):
-        self.called["performance"] = (period, granularity)
+        perf = self.called.get("performance", [])
+        perf.append((period, granularity))
+        self.called["performance"] = perf
         return PerformanceSnapshot(period=period, granularity=granularity, points=[])
 
     async def fetch_errors(self, limit: int):
-        self.called["errors"] = limit
+        errors = self.called.get("errors", [])
+        errors.append(limit)
+        self.called["errors"] = errors
         return ErrorSummary(total=0, items=[])
 
 
@@ -36,7 +40,9 @@ async def test_performance_validates_window():
     with pytest.raises(InvalidWindow):
         await svc.get_performance("5x", "1m")
     with pytest.raises(InvalidWindow):
-        await svc.get_performance("5m", "1x")
+        await svc.get_performance("1h", "1x")
+    with pytest.raises(InvalidWindow):
+        await svc.get_performance("15m", "1h")  # granularity cannot exceed period
 
 
 @pytest.mark.asyncio
@@ -49,6 +55,7 @@ async def test_errors_limit_bounds():
 
     res = await svc.get_errors(10)
     assert res.total == 0
+    assert svc._cache  # errors cache populated by default
 
 
 @pytest.mark.asyncio
@@ -58,3 +65,13 @@ async def test_caches_overview():
     await svc.get_overview()
     await svc.get_overview()
     assert adapter.called["overview"] == 1
+
+
+@pytest.mark.asyncio
+async def test_errors_cache_can_be_disabled():
+    adapter = _Adapter()
+    svc = SystemMetricsService(adapter, errors_ttl=0)
+    await svc.get_errors(5)
+    await svc.get_errors(5)
+    # No caching when ttl <= 0
+    assert adapter.called["errors"] == [5, 5]

@@ -35,6 +35,28 @@ class _FakeRedis:
         return True
 
 
+class _SlowEngine:
+    """Simulates a slow DB connect/execute to force timeout."""
+
+    def __init__(self, sleep_seconds: float = 0.05):
+        self.sleep_seconds = sleep_seconds
+
+    def connect(self):
+        import time
+
+        time.sleep(self.sleep_seconds)
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        return types.SimpleNamespace(scalar=lambda: 1)
+
+
 @pytest.mark.asyncio
 async def test_overview_degrades_on_fail(monkeypatch):
     adapter = SystemMetricsAdapter()
@@ -68,3 +90,34 @@ async def test_performance_returns_point(monkeypatch):
     point = result.points[0]
     assert point.db_latency_ms is not None
     assert point.redis_latency_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_db_timeout_degrades(monkeypatch):
+    adapter = SystemMetricsAdapter(db_timeout=0.01)
+
+    monkeypatch.setattr("app.infrastructure.services.system_metrics_adapter._get_engine", lambda: _SlowEngine(0.05))
+
+    async def _fake_redis_ok():
+        return _FakeRedis()
+
+    monkeypatch.setattr("app.infrastructure.services.system_metrics_adapter.get_redis", _fake_redis_ok)
+
+    result = await adapter.fetch_overview()
+    assert result.status == "degraded"
+    assert result.db_connected is False
+    assert result.redis_connected is True
+
+
+@pytest.mark.asyncio
+async def test_error_summary_handles_exception(monkeypatch):
+    adapter = SystemMetricsAdapter()
+
+    async def _boom(_limit):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(adapter, "_collect_errors", _boom)
+
+    summary = await adapter.fetch_errors(limit=5)
+    assert summary.total == 0
+    assert summary.items == []

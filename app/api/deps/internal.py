@@ -41,4 +41,9 @@ def get_audit_logger() -> AuditLogger:
 @lru_cache(maxsize=1)
 def get_system_metrics_service() -> SystemMetricsService:
     adapter = SystemMetricsAdapter()
-    return SystemMetricsService(adapter)
+    return SystemMetricsService(
+        adapter,
+        overview_ttl=10,
+        performance_ttl=30,
+        errors_ttl=2,
+    )
